@@ -1,10 +1,10 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const jwt = require('jsonwebtoken');
-const jwksRsa = require('jwks-rsa');
 const path = require('path');
+const crypto = require('crypto')
 
 const port = process.env.PORT || 3000;
 
@@ -12,78 +12,85 @@ const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
 const AUTH0_CLIENT_ID = process.env.AUTH0_CLIENT_ID;
 const AUTH0_CLIENT_SECRET = process.env.AUTH0_CLIENT_SECRET;
 const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE;
-
 const AUTH0_MGMT_AUDIENCE = process.env.AUTH0_MGMT_AUDIENCE;
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const jwksClient = jwksRsa({
-    jwksUri: `https://${AUTH0_DOMAIN}/.well-known/jwks.json`
-});
+let PUBLIC_KEY_CACHE = null;
 
-function getKey(header, callback) {
-    jwksClient.getSigningKey(header.kid, function(err, key) {
-        if (err) return callback(err);
-        const signingKey = key.getPublicKey();
-        callback(null, signingKey);
-    });
+async function getPublicKey() {
+    if (PUBLIC_KEY_CACHE) return PUBLIC_KEY_CACHE;
+
+    const resp = await fetch(`https://${AUTH0_DOMAIN}/pem`);
+    const cert = await resp.text();
+
+    if (!cert.includes("BEGIN CERTIFICATE")) {
+        throw new Error("Invalid CERTIFICATE received");
+    }
+
+    const publicKey = crypto.createPublicKey(cert).export({ type: "spki", format: "pem" });
+
+    PUBLIC_KEY_CACHE = publicKey;
+    console.log("Public key extracted & cached.");
+    return publicKey;
 }
 
 async function authMiddleware(req, res, next) {
-    const header = req.headers["authorization"];
-    if (!header) return res.status(401).json({ error: "No token" });
+    try {
+        const header = req.headers["authorization"];
+        if (!header) return res.status(401).json({ error: "No token" });
 
-    const token = header.split(" ")[1];
-    if (!token) return res.status(401).json({ error: "Invalid token format" });
+        const token = header.split(" ")[1];
+        if (!token) return res.status(401).json({ error: "Invalid token format" });
 
-    let decoded = jwt.decode(token);
+        const decoded = jwt.decode(token);
 
-    if (!decoded || !decoded.exp) {
-        return res.status(401).json({ error: "Invalid token format (cannot decode)" });
-    }
+        if (!decoded || !decoded.exp) {
+            return res.status(401).json({ error: "Invalid token (cannot decode)" });
+        }
 
-    const timeLeft = decoded.exp - Math.floor(Date.now() / 1000);
+        const timeLeft = decoded.exp - Math.floor(Date.now() / 1000);
 
-    if (timeLeft < 60 && req.headers["x-refresh-token"]) {
+        if (timeLeft < 60 && req.headers["x-refresh-token"]) {
+            const refreshToken = req.headers["x-refresh-token"];
 
-        const refresh = req.headers["x-refresh-token"];
+            const refreshResponse = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: new URLSearchParams({
+                    grant_type: "refresh_token",
+                    client_id: AUTH0_CLIENT_ID,
+                    client_secret: AUTH0_CLIENT_SECRET,
+                    refresh_token: refreshToken
+                })
+            });
 
-        const refreshResponse = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-                grant_type: "refresh_token",
-                client_id: AUTH0_CLIENT_ID,
-                client_secret: AUTH0_CLIENT_SECRET,
-                refresh_token: refresh
-            })
+            const refreshData = await refreshResponse.json();
+
+            if (refreshData.error) {
+                return res.status(401).json({ error: "Refresh failed", details: refreshData });
+            }
+
+            res.setHeader("x-new-access-token", refreshData.access_token);
+        }
+
+        const publicKey = await getPublicKey();
+
+        const verified = jwt.verify(token, publicKey, {
+            algorithms: ["RS256"],
+            audience: AUTH0_AUDIENCE,
+            issuer: `https://${AUTH0_DOMAIN}/`
         });
 
-        const refreshData = await refreshResponse.json();
+        req.user = verified;
+        next();
 
-        if (refreshData.error) {
-            return res.status(401).json({ error: "Refresh failed", details: refreshData });
-        }
-
-        res.setHeader("x-new-access-token", refreshData.access_token);
+    } catch (err) {
+        console.error("JWT verify error:", err);
+        return res.status(401).json({ error: "Token invalid", details: err.message });
     }
-
-    jwt.verify(
-        token,
-        getKey,
-        {
-            audience: AUTH0_AUDIENCE,
-            issuer: `https://${AUTH0_DOMAIN}/`,
-            algorithms: ["RS256"]
-        },
-        (err, verified) => {
-            if (err) return res.status(401).json({ error: "Token invalid", err });
-            req.user = verified;
-            next();
-        }
-    );
 }
 
 app.post('/api/register', async (req, res) => {
@@ -113,8 +120,8 @@ app.post('/api/register', async (req, res) => {
             "Authorization": `Bearer ${mgmtToken.access_token}`
         },
         body: JSON.stringify({
-            email: email,
-            password: password,
+            email,
+            password,
             connection: "Username-Password-Authentication"
         })
     });
