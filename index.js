@@ -163,13 +163,15 @@ app.get('/auth/login', (req, res) => {
     const redirectUri = encodeURIComponent(`http://localhost:${port}/auth/callback`);
     
     const authUrl =
-      `https://${AUTH0_DOMAIN}/authorize?` +
-      `response_type=code&` +
-      `client_id=${AUTH0_CLIENT_ID}&` +
-      `redirect_uri=${redirectUri}&` +
-      `response_mode=query&` +
-      `scope=openid profile email&` +
-      `audience=${encodeURIComponent(AUTH0_AUDIENCE)}`;
+        `https://${AUTH0_DOMAIN}/authorize?` +
+        `response_type=code&` +
+        `client_id=${AUTH0_CLIENT_ID}&` +
+        `redirect_uri=${redirectUri}&` +
+        `response_mode=query&` +
+        `scope=openid profile email&` +
+        `audience=${encodeURIComponent(AUTH0_AUDIENCE)}&` +
+        `prompt=login`;
+
 
     res.redirect(authUrl);
 });
