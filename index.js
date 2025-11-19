@@ -159,38 +159,61 @@ app.post('/api/register', async (req, res) => {
     res.json({ message: "User created", user: data });
 });
 
-app.post('/api/login', async (req, res) => {
-    const { login, password } = req.body;
+app.get('/auth/login', (req, res) => {
+    const redirectUri = encodeURIComponent(`http://localhost:${port}/auth/callback`);
+    
+    const authUrl =
+      `https://${AUTH0_DOMAIN}/authorize?` +
+      `response_type=code&` +
+      `client_id=${AUTH0_CLIENT_ID}&` +
+      `redirect_uri=${redirectUri}&` +
+      `response_mode=query&` +
+      `scope=openid profile email&` +
+      `audience=${encodeURIComponent(AUTH0_AUDIENCE)}`;
+
+    res.redirect(authUrl);
+});
+
+
+app.get('/auth/callback', async (req, res) => {
+    const { code } = req.query;
+
+    if (!code) return res.status(400).json({ error: "No code received" });
 
     const tokenResponse = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
         body: new URLSearchParams({
-            grant_type: "password",
-            username: login,
-            password: password,
+            grant_type: "authorization_code",
             client_id: AUTH0_CLIENT_ID,
             client_secret: AUTH0_CLIENT_SECRET,
-            audience: AUTH0_AUDIENCE,
-            scope: "openid profile email offline_access"
+            code,
+            redirect_uri: `http://localhost:${port}/auth/callback`
         })
     });
 
     const data = await tokenResponse.json();
-    if (data.error) return res.status(401).json({ error: data.error, details: data.error_description });
+
+    if (data.error) {
+        return res.status(400).json({ error: data.error, details: data.error_description });
+    }
 
     const idTokenPayload = jwt.decode(data.id_token);
+
     const encryptedToken = createEncryptedJWT({
-        sub: idTokenPayload?.sub || login,
-        email: login,
+        sub: idTokenPayload?.sub,
+        email: idTokenPayload?.email,
         auth0_data: idTokenPayload
     });
 
-    res.json({
+    return res.json({
+        message: "Login successful via AUTH CODE",
         access_token: encryptedToken,
         refresh_token: data.refresh_token,
-        expires_in: data.expires_in,
         id_token: data.id_token,
+        expires_in: data.expires_in,
         token_type: data.token_type
     });
 });
